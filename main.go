@@ -8,30 +8,6 @@ import (
 	"strconv"
 )
 
-type Site struct {
-	Host      string  `json:"host"`
-	AWSKey    string  `json:"awsKey"`
-	AWSSecret string  `json:"awsSecret"`
-	AWSRegion string  `json:"awsRegion"`
-	AWSBucket string  `json:"awsBucket"`
-	Users     []User  `json:"users"`
-	Options   Options `json:"options"`
-}
-
-type User struct {
-	Name     string `json:"name"`
-	Password string `json:"password"`
-}
-
-type Options struct {
-	CORS     bool   `json:"cors"`
-	Gzip     bool   `json:"gzip"`
-	Website  bool   `json:"website"`
-	Prefix   string `json:"prefix"`
-	ForceSSL bool   `json:"forceSsl"`
-	Proxied  bool   `json:"proxied"`
-}
-
 func main() {
 	handler, err := ConfiguredProxyHandler()
 	if err != nil {

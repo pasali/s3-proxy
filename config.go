@@ -1,59 +1,69 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"os"
-	"strings"
-
 	"github.com/gorilla/handlers"
+	"github.com/spf13/viper"
+	"net/http"
 )
 
-type sitesCfg []Site
-
-const (
-	kConfigName      = "S3PROXY_CONFIG"
-	kAWSKeyName      = "S3PROXY_AWS_KEY"
-	kAWSSecretName   = "S3PROXY_AWS_SECRET"
-	kAWSRegionName   = "S3PROXY_AWS_REGION"
-	kAWSBucketName   = "S3PROXY_AWS_BUCKET"
-	kUsersName       = "S3PROXY_USERS"
-	kCORSKeyName     = "S3PROXY_OPTION_CORS"
-	kGzipKeyName     = "S3PROXY_OPTION_GZIP"
-	kWebsiteKeyName  = "S3PROXY_OPTION_WEBSITE"
-	kPrefixKeyName   = "S3PROXY_OPTION_PREFIX"
-	kForceSSLKeyName = "S3PROXY_OPTION_FORCE_SSL"
-	kProxiedKeyName  = "S3PROXY_OPTION_PROXIED"
+var (
+	configDirs = []string{"/etc/s3-proxy/", "$HOME/.s3-proxy/", "."}
 )
 
-func ConfiguredProxyHandler() (http.Handler, error) {
-	_, ok := os.LookupEnv(kConfigName)
+type Config struct {
+	Sites []Site
+}
 
-	if ok {
-		return createMulti()
-	} else {
-		return createSingle()
+type Site struct {
+	Host    string
+	Bucket  string
+	Users   []User
+	Options Options
+}
+
+type User struct {
+	Name     string
+	Password string
+}
+
+type Options struct {
+	CORS     bool
+	Gzip     bool
+	Website  bool
+	Prefix   string
+	ForceSSL bool
+	Proxied  bool
+}
+
+func init() {
+	for _, value := range configDirs {
+		viper.AddConfigPath(value)
+	}
+
+	viper.SetConfigName("config")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
 	}
 }
 
-func createMulti() (http.Handler, error) {
-	var cfg sitesCfg
-	cfgJson := os.Getenv(kConfigName)
+func ConfiguredProxyHandler() (http.Handler, error) {
 
-	err := json.Unmarshal([]byte(cfgJson), &cfg)
+	var cfg Config
+	err := viper.Unmarshal(&cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(cfg) == 0 {
-		return nil, errors.New("Must specify one or more configurations")
+	if len(cfg.Sites) == 0 {
+		return nil, errors.New("must specify one or more configurations")
 	}
 
 	handler := NewHostDispatchingHandler()
 
-	for i, site := range cfg {
+	for i, site := range cfg.Sites {
 		err = site.validateWithHost()
 
 		if err != nil {
@@ -67,43 +77,10 @@ func createMulti() (http.Handler, error) {
 	return handler, nil
 }
 
-func createSingle() (http.Handler, error) {
-	users, err := parseUsers(os.Getenv(kUsersName))
-	if err != nil {
-		return nil, err
-	}
-
-	opts := Options{
-		CORS:     os.Getenv(kCORSKeyName) == "true",
-		Gzip:     os.Getenv(kGzipKeyName) == "true",
-		Website:  os.Getenv(kWebsiteKeyName) == "true",
-		Prefix:   os.Getenv(kPrefixKeyName),
-		ForceSSL: os.Getenv(kForceSSLKeyName) == "true",
-		Proxied:  os.Getenv(kProxiedKeyName) == "true",
-	}
-
-	s := Site{
-		AWSKey:    os.Getenv(kAWSKeyName),
-		AWSSecret: os.Getenv(kAWSSecretName),
-		AWSRegion: os.Getenv(kAWSRegionName),
-		AWSBucket: os.Getenv(kAWSBucketName),
-		Users:     users,
-		Options:   opts,
-	}
-
-	err = s.validate()
-
-	if err != nil {
-		return nil, err
-	} else {
-		return createSiteHandler(s), nil
-	}
-}
-
 func createSiteHandler(s Site) http.Handler {
 	var handler http.Handler
 
-	proxy := NewS3Proxy(s.AWSKey, s.AWSSecret, s.AWSRegion, s.AWSBucket)
+	proxy := NewS3Proxy(s.Bucket)
 	handler = NewProxyHandler(proxy, s.Options.Prefix)
 
 	if s.Options.Website {
@@ -111,7 +88,7 @@ func createSiteHandler(s Site) http.Handler {
 		if err != nil {
 			fmt.Printf("warning: site for bucket %s configured with "+
 				"website option but received error when retrieving "+
-				"website config\n\t%v", s.AWSBucket, err)
+				"website config\n\t%v", s.Bucket, err)
 		} else {
 			handler = NewWebsiteHandler(handler, cfg)
 		}
@@ -128,7 +105,7 @@ func createSiteHandler(s Site) http.Handler {
 	if len(s.Users) > 0 {
 		handler = NewBasicAuthHandler(s.Users, handler)
 	} else {
-		fmt.Printf("warning: site for bucket %s has no configured users\n", s.AWSBucket)
+		fmt.Printf("warning: site for bucket %s has no configured users\n", s.Bucket)
 	}
 
 	if s.Options.ForceSSL {
@@ -150,53 +127,9 @@ func corsHandler(next http.Handler) http.Handler {
 	)(next)
 }
 
-func parseUsers(us string) ([]User, error) {
-	if us == "" {
-		return []User{}, nil
-	}
-
-	pairs := strings.Split(us, ",")
-	users := make([]User, len(pairs))
-
-	for i, p := range pairs {
-		parts := strings.Split(p, ":")
-		if len(parts) != 2 {
-			msg := fmt.Sprintf("Failed to parse user %s at position %d", p, i)
-			return nil, errors.New(msg)
-		}
-
-		users[i] = User{
-			Name:     parts[0],
-			Password: parts[1],
-		}
-	}
-
-	return users, nil
-}
-
 func (s Site) validateWithHost() error {
 	if s.Host == "" {
 		return errors.New("Host not specified")
-	}
-
-	return s.validate()
-}
-
-func (s Site) validate() error {
-	if s.AWSKey == "" {
-		return errors.New("AWS Key not specified")
-	}
-
-	if s.AWSSecret == "" {
-		return errors.New("AWS Secret not specified")
-	}
-
-	if s.AWSRegion == "" {
-		return errors.New("AWS Region not specified")
-	}
-
-	if s.AWSBucket == "" {
-		return errors.New("AWS Bucket not specified")
 	}
 
 	return nil
